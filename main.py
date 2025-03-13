@@ -39,8 +39,10 @@ def send_to_posthog():
 
 
 def posthog_slow_capture(**kwargs):
+    # posthog says capture has no rate limit
+    # however, without the historical_migration option (a paid feature), this will trigger spike detection and drop events
+    # https://posthog.com/docs/api/capture#historical-migrations
     posthog.capture(**kwargs)
-    # posthog says capture has no rate limit, however, without some delay, they seem to drop events...
     time.sleep(0.15)
 
 
