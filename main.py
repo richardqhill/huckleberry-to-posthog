@@ -137,7 +137,7 @@ def send_diaper_events(df):
             timestamp=props['timestamp'])
 
 def send_sleep_events(df):
-    NIGHT_START_HOUR = 19
+    NIGHT_START_HOUR = 20
     NIGHT_END_HOUR = 7
 
     MERGE_SLEEP_CHUNKS = True
@@ -147,8 +147,8 @@ def send_sleep_events(df):
     df_sleep['Duration Minutes'] = df_sleep['Duration'].apply(lambda x: 0 if pd.isna(x) else int(x.split(':')[0]) * 60 + int(x.split(':')[1]))
 
     df_sleep = df_sleep.sort_values(by='datetime').reset_index(drop=True)
-    df_sleep['Start_dt'] = pd.to_datetime(df_sleep['Start'])
-    df_sleep['End_dt'] = pd.to_datetime(df_sleep['End'])
+    df_sleep['Start_dt'] = pd.to_datetime(df_sleep['Start']).dt.tz_localize(TIMEZONE, ambiguous=True)
+    df_sleep['End_dt'] = pd.to_datetime(df_sleep['End']).dt.tz_localize(TIMEZONE, ambiguous=True)
 
     if MERGE_SLEEP_CHUNKS:
         merged_intervals = []
@@ -192,19 +192,52 @@ def send_sleep_events(df):
 
     df_sleep['Type'] = df_sleep.apply(lambda row: categorize_sleep(row['Start_dt'], row['End_dt']), axis=1)
 
-    print("df_sleep # rows: ", len(df_sleep))
+    # What percentage of the night did they sleep
+    FULL_NIGHT_DURATION = (24 - NIGHT_START_HOUR + NIGHT_END_HOUR) * 60
+    sleep_dict = {}
+
+    for _, row in df_sleep.iterrows():
+        if row['Type'] != 'Night':
+            continue
+        
+        sleep_start, sleep_end = row["Start_dt"], row["End_dt"]
+
+        # associate early am sleep with the previous day for % calculations
+        if sleep_start.hour < NIGHT_END_HOUR:
+            night_date = (sleep_start - pd.Timedelta(days=1)).date()
+        else:
+            night_date = sleep_start.date()
+
+        night_start = pd.Timestamp(night_date).tz_localize(TIMEZONE, ambiguous=True) + pd.Timedelta(hours=NIGHT_START_HOUR)
+        night_end = pd.Timestamp(night_date).tz_localize(TIMEZONE, ambiguous=True) + pd.Timedelta(days=1, hours=NIGHT_END_HOUR)
+
+        clipped_start = max(sleep_start, night_start)
+        clipped_end = min(sleep_end, night_end)
+
+        if clipped_start < clipped_end:
+            sleep_minutes = (clipped_end - clipped_start).total_seconds() / 60
+            sleep_dict[night_date] = sleep_dict.get(night_date, 0) + sleep_minutes
+    
+    def calculate_percentage(start_time):
+        total_minutes = sleep_dict.get((start_time - pd.Timedelta(hours=7)).date(), 0)
+        return round(total_minutes / FULL_NIGHT_DURATION * 100, 1)
+
+    df_sleep['Percentage'] = df_sleep.apply(lambda row: calculate_percentage(row['Start_dt']), axis=1)
+
+
     for _, row in tqdm(df_sleep.iterrows(), total=len(df_sleep), desc="sleeps"):
         event_name = 'Sleep'
         props = {
-                    "timestamp": TIMEZONE.localize(row["Start_dt"]),
+                    "timestamp": row["Start_dt"],
                     "DOL": row["DOL"],
                     "Duration": row["Duration Minutes"],
                     "Type": row["Type"],
                     "Num_Logs": row["Num_Logs"],
-                    "Time Since Last": row["Time Since Last"]
+                    "Time Since Last": row["Time Since Last"],
+                    "Percentage": row["Percentage"],
                 }
         
-        # print(f"{row["Start_dt"]}, {row["End_dt"]}, {props["Type"]}, {props["Duration"]} ")
+        # print(f"{row["Start_dt"]}, {row["End_dt"]}, {props["Type"]}, {props["Duration"]}, , {props["Percentage"]} ")
         posthog_slow_capture(
             distinct_id=BABY_USER_ID,
             event=event_name,
